@@ -2,7 +2,7 @@
 bl_info = {
     "name": "GHG Importer (Skeleton + Skinned parts)",
     "author": "Queue Wafer",
-    "version": (2, 0, 0),
+    "version": (1, 0, 0),
     "blender": (3, 0, 0),
     "location": "File > Import > GHG Skeleton + Skinned parts (.ghg)",
     "description": "Import a GHG skeleton and selected mesh parts with blend weights from extractor output",
@@ -30,6 +30,18 @@ EXTRACTOR_NAMES = (
     "ExtractDx11MESH.exe",
     "ExtractNxgMESH.exe",
 )
+
+EXTRACTOR_FAMILIES = {
+    "LEGACY": EXTRACTOR_NAMES,
+    "DX11": (
+        "ExtractDx11MESHFix.exe",
+        "ExtractDx11MESH.exe",
+    ),
+    "NXG": (
+        "ExtractNxgMESHFix.exe",
+        "ExtractNxgMESH.exe",
+    ),
+}
 
 ATTR_LENGTHS = {
     "4float": 16,
@@ -163,19 +175,20 @@ def _parse_part_selection(text, max_part_index):
     return result
 
 
-def _find_extractor(extractor_directory: Path) -> Path:
-    for name in EXTRACTOR_NAMES:
+def _find_extractor(extractor_directory: Path, extractor_mode: str = "LEGACY") -> Path:
+    names = EXTRACTOR_FAMILIES.get(extractor_mode, EXTRACTOR_NAMES)
+    for name in names:
         path = extractor_directory / name
         if path.exists():
             return path
     raise FileNotFoundError(
         "Could not find an extractor executable in the selected folder. "
-        "Expected one of: " + ", ".join(EXTRACTOR_NAMES)
+        "Expected one of: " + ", ".join(names)
     )
 
 
-def _run_extractor(extractor_directory: Path, ghg_file: Path) -> str:
-    exe = _find_extractor(extractor_directory)
+def _run_extractor(extractor_directory: Path, ghg_file: Path, extractor_mode: str = "LEGACY") -> str:
+    exe = _find_extractor(extractor_directory, extractor_mode=extractor_mode)
     process = subprocess.Popen(
         [str(exe), str(ghg_file)],
         cwd=str(extractor_directory),
@@ -673,6 +686,17 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
         description="Folder containing ExtractDx11MESHFix.exe / ExtractNxgMESHFix.exe",
     )
 
+    extractor_mode: EnumProperty(
+        name="Extractor Mode",
+        items=[
+            ('LEGACY', "Legacy", "Use the first extractor executable found"),
+            ('DX11', "DX11", "Use ExtractDx11MESH or ExtractDx11MESHFix"),
+            ('NXG', "NXG", "Use ExtractNxgMESH or ExtractNxgMESHFix"),
+        ],
+        default='LEGACY',
+        description="Choose which extractor family to use",
+    )
+
     parts_text: StringProperty(
         name="Part Numbers",
         default="0",
@@ -752,7 +776,7 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
             bones_for_names = _armature_bones_as_list(selected_armature)
 
         try:
-            extractor_output = _run_extractor(extractor_directory, ghg_file)
+            extractor_output = _run_extractor(extractor_directory, ghg_file, self.extractor_mode)
             parts = _parse_blend_and_part_data(extractor_output, ghg_bytes, bones_for_names)
         except Exception as e:
             self.report({"ERROR"}, f"Failed to parse blend / part data: {e}")
@@ -818,7 +842,6 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
 
 def menu_func_import(self, context):
     self.layout.operator(IMPORT_OT_ghg_skeleton_parts.bl_idname, text="GHG Skeleton + Skinned parts (.ghg)")
-
 
 
 # register logic for opening via the scripting tab, so if you click the play button multiple times there's only one import button still. Not needed if loading as an addon.
