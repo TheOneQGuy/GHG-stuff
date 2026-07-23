@@ -1,5 +1,5 @@
 # GHG-stuff
-Tools for working with GHG skeleton and skinning stuff. Currently unfinished.
+Tools for working with GHG skeleton and skinning stuff. AI help was used for some parts. Currently unfinished.
 
 ## GogHogGog (main tool)
 Blender plugin allowing you to import the skeleton and skinned parts from an NXG/DX11/NTT GHG file. No exporting yet. Install via Edit > Preferences > Add-Ons > Install from Disk...
