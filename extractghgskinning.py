@@ -217,16 +217,19 @@ def get_list_of_parts():
                 string = current_part_info
             )
         )
-        print(bone_indices_raw)
-        bone_indices = []
-        for j in range((len(bone_indices_raw)//3)):
-            bone_idx = j*3
-            bone_indices.append(
-                int(
-                    bone_indices_raw[bone_idx:bone_idx+2],
-                    16
+
+        if len(bone_indices_raw)==80:
+            bone_indices = []
+            for j in range((len(bone_indices_raw)//3)):
+                bone_idx = j*3
+                bone_indices.append(
+                    int(
+                        bone_indices_raw[bone_idx:bone_idx+2],
+                        16
+                    )
                 )
-            )
+        else:
+            bone_indices = range(len(bones))
 
         part_vertices = (
             vertexlists[part_vertexlist_id][

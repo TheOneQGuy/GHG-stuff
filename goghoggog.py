@@ -438,15 +438,18 @@ def _parse_blend_and_part_data(extractor_output: str, ghg_bytes: bytes, bones: l
 
         # bone_indices = [int(x, 16) for x in re.findall(r"[0-9A-Fa-f]{2}", bone_indices_raw)]
 
-        bone_indices = []
-        for j in range((len(bone_indices_raw)//3)):
-            bone_idx = j*3
-            bone_indices.append(
-                int(
-                    bone_indices_raw[bone_idx:bone_idx+2],
-                    16
+        if len(bone_indices_raw)==80:
+            bone_indices = []
+            for j in range((len(bone_indices_raw)//3)):
+                bone_idx = j*3
+                bone_indices.append(
+                    int(
+                        bone_indices_raw[bone_idx:bone_idx+2],
+                        16
+                    )
                 )
-            )
+        else:
+            bone_indices = range(len(bones))
 
         part_vertices = vertexlists[part_vertexlist_id][offset_vertices:offset_vertices + number_vertices]
 
