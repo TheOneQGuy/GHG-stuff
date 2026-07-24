@@ -255,7 +255,7 @@ def _parse_bones_from_ghg(ghg_bytes: bytes):
     logh_offset = ghg_bytes.replace(b"LOGH", b"AAAA", logh_index).index(b"LOGH")
     logh_version = int(ghg_bytes[logh_offset + 4:logh_offset + 8].hex(), 16)
 
-    if logh_version in (16, 17):
+    if logh_version >= 14:
         rotv_data_start_offset = logh_offset + 4 + 4 + 4 + 4
         current_bone_till_end = ghg_bytes[rotv_data_start_offset:]
         rotv_items_count = int(ghg_bytes[logh_offset + 12:logh_offset + 16].hex(), 16)
@@ -295,7 +295,7 @@ def _parse_bones_from_ghg(ghg_bytes: bytes):
             bones[k]["rotation"] = list(rot)
             bones[k]["scale"] = list(scl)
 
-    elif logh_version in (4, 9, 10):
+    else:
         default_string_offset = ghg_bytes.index(b"default_string")
         name_strings = ghg_bytes[default_string_offset:]
 
@@ -337,8 +337,8 @@ def _parse_bones_from_ghg(ghg_bytes: bytes):
             bones[k]["position"] = list(pos)
             bones[k]["rotation"] = list(rot)
             bones[k]["scale"] = list(scl)
-    else:
-        raise ValueError(f"Unsupported LOGH version: {logh_version}")
+    # else:
+    #     raise ValueError(f"Unsupported LOGH version: {logh_version}")
 
     return bones
 

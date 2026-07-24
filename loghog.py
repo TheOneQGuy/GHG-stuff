@@ -32,12 +32,12 @@ def main():
 
     LOGH_version = int(GHG_bytes[LOGH_offset+4:LOGH_offset+8].hex(), 16)
 
-    if LOGH_version in (16,17) :
+    if LOGH_version >= 14:
         LOGH_11()
-    elif LOGH_version in (4, 9, 10):
-        LOGH_0A()
     else:
-        print(f"Unsupported LOGH version {LOGH_version:02X}")
+        LOGH_0A()
+    # else:
+    #     print(f"Unsupported LOGH version {LOGH_version:02X}")
 
     json_file=GHG_file.with_suffix(".json")
 
