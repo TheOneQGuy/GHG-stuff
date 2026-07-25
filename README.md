@@ -4,6 +4,8 @@ Tools for working with GHG skeleton and skinning stuff. AI help was used for som
 ## Modify-GHG-Skinning (main tool)
 Blender plugin allowing you to import the skeleton and skinned parts from an NXG/DX11/NTT GHG file. You can then change the skinning of the parts based on the exsiting skeleton and export the updated skinning back to the GHG (Custom skinnned meshes finally!). Install via Edit > Preferences > Add-Ons > Install from Disk...
 
+NOTE: This tool can't reimport modified meshes. It can only reimport the skinning of the parts. Use something like Diorama for changing the mesh itself and THEN use this plugin for rigging the model.
+
 ## LogHog
 Extracts a json containing a GHG's skeleton data such as name, index, parent index, position, rotation, and scale for each bone. Useful for correcting bone indices when manually porting GHG to a slightly different skeleton.
 
