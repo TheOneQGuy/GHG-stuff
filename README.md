@@ -7,7 +7,7 @@ Blender plugin allowing you to import the skeleton and skinned parts from an NXG
 NOTE: This tool can't reimport modified meshes. It can only reimport the skinning of the parts. Use something like Diorama (or the manual hex method) for changing the mesh itself and THEN use this plugin for rigging the model.
 
 ## LogHog
-Extracts a json containing a GHG's skeleton data such as name, index, parent index, position, rotation, and scale for each bone. Useful for correcting bone indices when manually porting GHG to a slightly different skeleton.
+Extracts a json containing a GHG's skeleton data such as name, index, parent index, position, rotation, and scale for each bone. Useful for correcting bone indices when manually porting GHG to a slightly different skeleton. Has a compiled exe version for people who don't know how to run Python scripts normally.
 
 ## import_from_ghg_template
 Gets the skeleton plus blend weight data for each part from a GHG. Doesn't output anything on its own and is supposed to be used for other projects because it doesn't have the blender stuff and thus is easier to read the GHG stuff from it.
