@@ -33,12 +33,20 @@ EXTRACTOR_NAMES = (
 )
 
 EXTRACTOR_FAMILIES = {
-    "LEGACY": EXTRACTOR_NAMES,
+    "ANY": EXTRACTOR_NAMES,
     "DX11": (
+        "ExtractDx11MESH.exe",
+        "ExtractDx11MESHFix.exe",
+    ),
+    "DX11Fix": (
         "ExtractDx11MESHFix.exe",
         "ExtractDx11MESH.exe",
     ),
     "NXG": (
+        "ExtractNxgMESH.exe",
+        "ExtractNxgMESHFix.exe",
+    ),
+    "NXGFix": (
         "ExtractNxgMESHFix.exe",
         "ExtractNxgMESH.exe",
     ),
@@ -60,6 +68,12 @@ def _addon_prefs():
     return addon.preferences if addon else None
 
 
+def _normalize_extractor_mode(mode: str | None) -> str:
+    if mode in (None, "", "LEGACY"):
+        return "ANY"
+    return mode
+
+
 class GHGAddonPreferences(AddonPreferences):
     bl_idname = __package__ or __name__
 
@@ -73,11 +87,13 @@ class GHGAddonPreferences(AddonPreferences):
     extractor_mode: EnumProperty(
         name="Extractor Mode",
         items=[
-            ('LEGACY', "Legacy", "Use the first extractor executable found"),
-            ('DX11', "DX11", "Use ExtractDx11MESH or ExtractDx11MESHFix"),
-            ('NXG', "NXG", "Use ExtractNxgMESH or ExtractNxgMESHFix"),
+            ('ANY', "Any", "Use the first extractor executable found"),
+            ('DX11', "DX11", "Use ExtractDx11MESH first, then ExtractDx11MESHFix if needed"),
+            ('DX11Fix', "DX11Fix", "Use ExtractDx11MESHFix first, then ExtractDx11MESH if needed"),
+            ('NXG', "NXG", "Use ExtractNxgMESH first, then ExtractNxgMESHFix if needed"),
+            ('NXGFix', "NXGFix", "Use ExtractNxgMESHFix first, then ExtractNxgMESH if needed"),
         ],
-        default='LEGACY',
+        default='ANY',
         description="Choose which extractor family to use",
     )
 
@@ -94,7 +110,7 @@ def _load_extractor_settings_from_prefs(op):
     if not getattr(op, "extractor_folder", "").strip() and getattr(prefs, "extractor_folder", "").strip():
         op.extractor_folder = prefs.extractor_folder
     if getattr(op, "extractor_mode", None) in {None, ""}:
-        op.extractor_mode = prefs.extractor_mode
+        op.extractor_mode = _normalize_extractor_mode(prefs.extractor_mode)
 
 
 def _save_extractor_settings_to_prefs(op):
@@ -102,7 +118,7 @@ def _save_extractor_settings_to_prefs(op):
     if prefs is None:
         return
     prefs.extractor_folder = getattr(op, "extractor_folder", "")
-    prefs.extractor_mode = getattr(op, "extractor_mode", "LEGACY")
+    prefs.extractor_mode = _normalize_extractor_mode(getattr(op, "extractor_mode", "ANY"))
 
 
 def _addon_dir() -> Path:
@@ -226,8 +242,8 @@ def _parse_part_selection(text, max_part_index):
     return result
 
 
-def _find_extractor(extractor_directory: Path, extractor_mode: str = "LEGACY") -> Path:
-    names = EXTRACTOR_FAMILIES.get(extractor_mode, EXTRACTOR_NAMES)
+def _find_extractor(extractor_directory: Path, extractor_mode: str = "ANY") -> Path:
+    names = EXTRACTOR_FAMILIES.get(_normalize_extractor_mode(extractor_mode), EXTRACTOR_NAMES)
     for name in names:
         path = extractor_directory / name
         if path.exists():
@@ -238,7 +254,7 @@ def _find_extractor(extractor_directory: Path, extractor_mode: str = "LEGACY") -
     )
 
 
-def _run_extractor(extractor_directory: Path, ghg_file: Path, extractor_mode: str = "LEGACY") -> str:
+def _run_extractor(extractor_directory: Path, ghg_file: Path, extractor_mode: str = "ANY") -> str:
     exe = _find_extractor(extractor_directory, extractor_mode=extractor_mode)
     process = subprocess.Popen(
         [str(exe), str(ghg_file)],
@@ -743,11 +759,13 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
     extractor_mode: EnumProperty(
         name="Extractor Mode",
         items=[
-            ('LEGACY', "Legacy", "Use the first extractor executable found"),
-            ('DX11', "DX11", "Use ExtractDx11MESH or ExtractDx11MESHFix"),
-            ('NXG', "NXG", "Use ExtractNxgMESH or ExtractNxgMESHFix"),
+            ('ANY', "Any", "Use the first extractor executable found"),
+            ('DX11', "DX11", "Use ExtractDx11MESH first, then ExtractDx11MESHFix if needed"),
+            ('DX11Fix', "DX11Fix", "Use ExtractDx11MESHFix first, then ExtractDx11MESH if needed"),
+            ('NXG', "NXG", "Use ExtractNxgMESH first, then ExtractNxgMESHFix if needed"),
+            ('NXGFix', "NXGFix", "Use ExtractNxgMESHFix first, then ExtractNxgMESH if needed"),
         ],
-        default='LEGACY',
+        default='ANY',
         description="Choose which extractor family to use",
     )
 
@@ -821,6 +839,7 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
             ghg_bytes = _read_ghg_bytes(ghg_file)
             bones = _parse_bones_from_ghg(ghg_bytes)
         except Exception as e:
+            traceback.print_exc()
             self.report({"ERROR"}, f"Failed to parse skeleton: {e}")
             return {"CANCELLED"}
 
@@ -836,6 +855,7 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
             extractor_output = _run_extractor(extractor_directory, ghg_file, self.extractor_mode)
             parts = _parse_blend_and_part_data(extractor_output, ghg_bytes, bones_for_names)
         except Exception as e:
+            traceback.print_exc()
             self.report({"ERROR"}, f"Failed to parse blend / part data: {e}")
             return {"CANCELLED"}
 
@@ -849,6 +869,7 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
                     source_up=self.source_up,
                 )
             except Exception as e:
+                traceback.print_exc()
                 self.report({"ERROR"}, f"Failed to create armature: {e}")
                 return {"CANCELLED"}
         else:
@@ -881,6 +902,7 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
                     _assign_weights_to_mesh(mesh_obj, armature_obj, parts[part_id])
                 imported_any = True
             except Exception as e:
+                traceback.print_exc()
                 self.report({"ERROR"}, f"Failed to import part {part_id}: {e}")
                 return {"CANCELLED"}
 
@@ -975,7 +997,7 @@ def _export_build_parts_from_selected_objects(context):
     return export_parts
 
 
-def _export_get_extractor_output(exp_extractor_dir: Path, exp_ghg_file: Path, exp_extractor_mode: str = "LEGACY") -> str:
+def _export_get_extractor_output(exp_extractor_dir: Path, exp_ghg_file: Path, exp_extractor_mode: str = "ANY") -> str:
     return _run_extractor(exp_extractor_dir, exp_ghg_file, exp_extractor_mode)
 
 
@@ -1176,11 +1198,13 @@ class EXPORT_OT_ghg_skeleton_parts(Operator, ExportHelper):
     extractor_mode: EnumProperty(
         name="Extractor Mode",
         items=[
-            ('LEGACY', "Legacy", "Use the first extractor executable found"),
-            ('DX11', "DX11", "Use ExtractDx11MESH or ExtractDx11MESHFix"),
-            ('NXG', "NXG", "Use ExtractNxgMESH or ExtractNxgMESHFix"),
+            ('ANY', "Any", "Use the first extractor executable found"),
+            ('DX11', "DX11", "Use ExtractDx11MESH first, then ExtractDx11MESHFix if needed"),
+            ('DX11Fix', "DX11Fix", "Use ExtractDx11MESHFix first, then ExtractDx11MESH if needed"),
+            ('NXG', "NXG", "Use ExtractNxgMESH first, then ExtractNxgMESHFix if needed"),
+            ('NXGFix', "NXGFix", "Use ExtractNxgMESHFix first, then ExtractNxgMESH if needed"),
         ],
-        default='LEGACY',
+        default='ANY',
         description="Choose which extractor family to use",
     )
 
