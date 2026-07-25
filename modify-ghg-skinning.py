@@ -1,11 +1,11 @@
 
 bl_info = {
-    "name": "GHG Importer (Skeleton + Skinned parts)",
+    "name": "GHG Importer / Exporter (Skeleton + Skinned parts)",
     "author": "Queue Wafer",
-    "version": (1, 0, 0),
+    "version": (2, 0, 0),
     "blender": (3, 0, 0),
-    "location": "File > Import > GHG Skeleton + Skinned parts (.ghg)",
-    "description": "Import a GHG skeleton and selected mesh parts with blend weights from extractor output",
+    "location": "File > Import > GHG Skeleton + Skinned parts (.ghg), File > Export > Parts skinning (.ghg)",
+    "description": "Import a GHG skeleton and skinned parts, modify their skinning, and export the skining.",
     "category": "Import-Export",
 }
 
@@ -13,13 +13,14 @@ import math
 import os
 import re
 import subprocess
+import traceback
 from pathlib import Path
 from struct import unpack
 
 import bpy
 from bpy.props import BoolProperty, EnumProperty, StringProperty
-from bpy.types import Operator
-from bpy_extras.io_utils import ImportHelper, axis_conversion
+from bpy.types import AddonPreferences, Operator
+from bpy_extras.io_utils import ImportHelper, ExportHelper, axis_conversion
 from mathutils import Matrix, Quaternion, Vector
 
 
@@ -52,6 +53,56 @@ ATTR_LENGTHS = {
     "4char": 4,
     "2half": 4,
 }
+
+
+def _addon_prefs():
+    addon = bpy.context.preferences.addons.get(__package__ or __name__)
+    return addon.preferences if addon else None
+
+
+class GHGAddonPreferences(AddonPreferences):
+    bl_idname = __package__ or __name__
+
+    extractor_folder: StringProperty(
+        name="Extractor Folder",
+        subtype="DIR_PATH",
+        default="",
+        description="Folder containing ExtractDx11MESHFix.exe / ExtractNxgMESHFix.exe",
+    )
+
+    extractor_mode: EnumProperty(
+        name="Extractor Mode",
+        items=[
+            ('LEGACY', "Legacy", "Use the first extractor executable found"),
+            ('DX11', "DX11", "Use ExtractDx11MESH or ExtractDx11MESHFix"),
+            ('NXG', "NXG", "Use ExtractNxgMESH or ExtractNxgMESHFix"),
+        ],
+        default='LEGACY',
+        description="Choose which extractor family to use",
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "extractor_folder")
+        layout.prop(self, "extractor_mode")
+
+
+def _load_extractor_settings_from_prefs(op):
+    prefs = _addon_prefs()
+    if prefs is None:
+        return
+    if not getattr(op, "extractor_folder", "").strip() and getattr(prefs, "extractor_folder", "").strip():
+        op.extractor_folder = prefs.extractor_folder
+    if getattr(op, "extractor_mode", None) in {None, ""}:
+        op.extractor_mode = prefs.extractor_mode
+
+
+def _save_extractor_settings_to_prefs(op):
+    prefs = _addon_prefs()
+    if prefs is None:
+        return
+    prefs.extractor_folder = getattr(op, "extractor_folder", "")
+    prefs.extractor_mode = getattr(op, "extractor_mode", "LEGACY")
 
 
 def _addon_dir() -> Path:
@@ -739,6 +790,7 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
     )
 
     def invoke(self, context, event):
+        _load_extractor_settings_from_prefs(self)
         if not self.extractor_folder.strip():
             self.extractor_folder = str(_addon_dir())
         return ImportHelper.invoke(self, context, event)
@@ -760,6 +812,8 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
         extractor_directory = _normalize_dir_path(self.extractor_folder)
         if extractor_directory is None or not extractor_directory.exists() or not extractor_directory.is_dir():
             extractor_directory = _addon_dir()
+
+        _save_extractor_settings_to_prefs(self)
 
         selected_armature = _selected_armature_from_context(context)
 
@@ -843,42 +897,411 @@ class IMPORT_OT_ghg_skeleton_parts(Operator, ImportHelper):
         return {"FINISHED"}
 
 
+
+# -----------------------------------------------------------------------------
+# Export side (separate from import-side state)
+# -----------------------------------------------------------------------------
+
+def _export_get_bone_names_from_ghg_bytes(exp_ghg_bytes: bytes):
+    # Reuse the pure skeleton parser, but keep export-side state separate.
+    return [bone["name"] for bone in _parse_bones_from_ghg(exp_ghg_bytes)]
+
+
+def _export_part_id_from_object_name(name: str):
+    # Use the last 4 characters of the object name before Blender's ".001" suffix.
+    # Example: "foo_dx110001" -> part id 1 from "0001".
+    base_name = re.sub(r"\.[0-9]{3}$", "", name)
+    if len(base_name) < 4:
+        return None
+    suffix = base_name[-4:]
+    if not suffix.isdigit():
+        return None
+    return int(suffix)
+
+
+def _export_build_parts_from_selected_objects(context):
+    """
+    Build:
+      export_parts[part_id] = {
+        "blendnames": [[...], [...], ...],   # per-vertex lists
+        "blendweights": [[...], [...], ...], # per-vertex lists
+        "object_name": str,
+      }
+    """
+    export_parts = {}
+
+    for obj in getattr(context, "selected_objects", []):
+        if getattr(obj, "type", None) != "MESH":
+            continue
+
+        part_id = _export_part_id_from_object_name(obj.name)
+        if part_id is None:
+            continue
+
+        mesh = obj.data
+        per_vertex_names = []
+        per_vertex_weights = []
+
+        for vertex in mesh.vertices:
+            weighted = []
+            for group_ref in vertex.groups:
+                try:
+                    weight = float(group_ref.weight)
+                except Exception:
+                    continue
+                if weight <= 0.0:
+                    continue
+                group_name = obj.vertex_groups[group_ref.group].name
+                if group_name:
+                    weighted.append((group_name, weight))
+
+            weighted.sort(key=lambda item: (-item[1], item[0]))
+
+            total_weight = sum(weight for _, weight in weighted)
+            if total_weight > 0.0:
+                normalized = [(name, weight / total_weight) for name, weight in weighted]
+            else:
+                normalized = []
+
+            per_vertex_names.append([name for name, _ in normalized])
+            per_vertex_weights.append([weight for _, weight in normalized])
+
+        export_parts[part_id] = {
+            "blendnames": per_vertex_names,
+            "blendweights": per_vertex_weights,
+            "object_name": obj.name,
+        }
+
+    return export_parts
+
+
+def _export_get_extractor_output(exp_extractor_dir: Path, exp_ghg_file: Path, exp_extractor_mode: str = "LEGACY") -> str:
+    return _run_extractor(exp_extractor_dir, exp_ghg_file, exp_extractor_mode)
+
+
+def _export_get_vertexlist_offsets(exp_extractor_output: str, exp_ghg_bytes: bytes):
+    exp_number_of_parts = _get_extractor_value("Number of Parts: 0x", string=exp_extractor_output)
+    exp_vertexlists = {}
+    exp_skinned_vertexlist_ids = []
+
+    c = 0
+    while True:
+        try:
+            vertex_list_id = _get_extractor_value("New Vertex List 0x", c, length=4, string=exp_extractor_output)
+        except ValueError:
+            break
+
+        number_of_vertices = _get_extractor_value("Number of Vertices: ", c, string=exp_extractor_output)
+        vertexlist_info_raw = exp_extractor_output[
+            _get_string_index("New Vertex List 0x", c, string=exp_extractor_output):
+            _get_string_index("Number of Vertices: ", c, string=exp_extractor_output)
+        ]
+
+        if "blendWeight0" not in vertexlist_info_raw:
+            c += 1
+            continue
+
+        attrlengths_sum = 0
+        for key, size in ATTR_LENGTHS.items():
+            attrlengths_sum += vertexlist_info_raw.count(key) * size
+
+        start_offset = _get_file_offset("Number of Vertices: ", c, string=exp_extractor_output)
+
+        exp_vertexlists[vertex_list_id] = {
+            "offset": start_offset,
+            "attrlengths_sum": attrlengths_sum,
+            "number_of_vertices": number_of_vertices,
+        }
+        exp_skinned_vertexlist_ids.append(vertex_list_id)
+        c += 1
+
+    return exp_number_of_parts, exp_vertexlists, exp_skinned_vertexlist_ids
+
+
+def _export_part_spans(exp_extractor_output: str):
+    """
+    Returns a sorted list of tuples: (part_id, start_index, end_index)
+    """
+    spans = []
+    matches = list(re.finditer(r"Part 0x([0-9A-Fa-f]{8})", exp_extractor_output))
+    for idx, match in enumerate(matches):
+        part_id = int(match.group(1), 16)
+        start = match.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(exp_extractor_output)
+        spans.append((part_id, start, end))
+    return spans
+
+
+def _export_write_part_blends(
+    exp_ghg_bytes: bytes,
+    exp_ghg_file: Path,
+    exp_bone_names: list[str],
+    exp_extractor_output: str,
+    exp_vertexlists: dict,
+    exp_skinned_vertexlist_ids: list,
+    export_parts: dict,
+):
+    part_spans = {part_id: (start, end) for part_id, start, end in _export_part_spans(exp_extractor_output)}
+    updated_bytes = exp_ghg_bytes
+
+    for part_id, part_info in export_parts.items():
+        if part_id not in part_spans:
+            print(f"Export skipped part {part_id}: part block not found in extractor output.")
+            continue
+
+        start_string_index, end_string_index = part_spans[part_id]
+        extractor_part_info = exp_extractor_output[start_string_index:end_string_index]
+
+        part_vertexlist_id = None
+        for vertexlist_id in exp_skinned_vertexlist_ids:
+            if (
+                f"New Vertex List {vertexlist_id:#06x}" in extractor_part_info or
+                f"Vertex List Reference to {vertexlist_id:#06x}" in extractor_part_info
+            ):
+                part_vertexlist_id = vertexlist_id
+                break
+
+        if part_vertexlist_id is None:
+            print(f"Export skipped part {part_id}: no skinned vertex list reference found.")
+            continue
+
+        if part_vertexlist_id not in exp_vertexlists:
+            print(f"Export skipped part {part_id}: vertex list metadata missing.")
+            continue
+
+        offset_vertices = _get_extractor_value("Offset Vertices: 0x", string=extractor_part_info)
+        number_vertices = _get_extractor_value("Number Vertices: 0x", string=extractor_part_info)
+
+        blendnames_by_vertex = part_info.get("blendnames", [])
+        blendweights_by_vertex = part_info.get("blendweights", [])
+
+        if len(blendnames_by_vertex) != len(blendweights_by_vertex):
+            print(f"Export skipped part {part_id}: blendnames/blendweights length mismatch.")
+            continue
+
+        if len(blendnames_by_vertex) != number_vertices:
+            print(
+                f"Export skipped part {part_id}: vertex count mismatch "
+                f"(Blender {len(blendnames_by_vertex)} vs GHG {number_vertices})."
+            )
+            continue
+
+        used_bone_names = []
+        for names in blendnames_by_vertex:
+            if len(names) > 4:
+                print(f"Export skipped part {part_id}: a vertex uses more than 4 bones.")
+                used_bone_names = []
+                break
+            for name in names:
+                if name and name != "None" and name not in used_bone_names:
+                    used_bone_names.append(name)
+
+        if not used_bone_names:
+            print(f"Export skipped part {part_id}: no usable bone names found.")
+            continue
+
+        # Keep only names that exist in the target GHG skeleton.
+        missing = [name for name in used_bone_names if name not in exp_bone_names]
+        if missing:
+            print(f"Export skipped part {part_id}: missing bones in GHG: {missing}")
+            continue
+
+        bone_names_in_order_of_use = used_bone_names
+
+        # Some extractor outputs include a bone-index remap table for this part.
+        bone_indices_raw = _get_extractor_value(
+            "Number Vertices: 0x",
+            offset=8 + 1 + 8 + 5,
+            length=80,
+            integer_output=False,
+            string=extractor_part_info,
+        )
+        has_bone_indices = len(bone_indices_raw) == 80
+
+        if has_bone_indices:
+            bone_indices_offset = _get_extractor_value(
+                "Number Vertices: 0x",
+                offset=8 + 1,
+                length=8,
+                integer_output=True,
+                string=extractor_part_info,
+            )
+            bone_indices_ints = [exp_bone_names.index(name) for name in used_bone_names]
+            bone_indices_to_write = bytes(bone_indices_ints) + bytes([0xFF]) * (27 - len(bone_indices_ints))
+            updated_bytes = (
+                updated_bytes[:bone_indices_offset] +
+                bone_indices_to_write +
+                updated_bytes[bone_indices_offset + 27:]
+            )
+
+        used_vertexlist_offset = exp_vertexlists[part_vertexlist_id]["offset"]
+        used_vertexlist_attrlensum = exp_vertexlists[part_vertexlist_id]["attrlengths_sum"]
+
+        for i in range(number_vertices):
+            names = blendnames_by_vertex[i]
+            weights = blendweights_by_vertex[i]
+
+            idx_bytes = bytes([bone_names_in_order_of_use.index(name) for name in names])
+            wgt_bytes = bytes([max(0, min(255, int(round(weight * 255.0)))) for weight in weights])
+
+            idx_bytes = idx_bytes + bytes([0x00]) * (4 - len(idx_bytes))
+            wgt_bytes = wgt_bytes + bytes([0x00]) * (4 - len(wgt_bytes))
+
+            write_start = used_vertexlist_offset + (i + 1) * used_vertexlist_attrlensum - 8
+            write_end = write_start + 8
+            updated_bytes = updated_bytes[:write_start] + idx_bytes + wgt_bytes + updated_bytes[write_end:]
+
+    if not exp_ghg_file.exists():
+        raise FileNotFoundError(f"Target GHG file does not exist: {exp_ghg_file}")
+
+    exp_ghg_file.write_bytes(updated_bytes)
+    return updated_bytes
+
+
+class EXPORT_OT_ghg_skeleton_parts(Operator, ExportHelper):
+    bl_idname = "export_scene.ghg_skeleton_parts"
+    bl_label = "Export GHG Skeleton + Skinned parts"
+    bl_description = "Export selected mesh parts back into an existing GHG file"
+    bl_options = {"UNDO"}
+
+    filename_ext = ".ghg"
+    filter_glob: StringProperty(default="*.ghg", options={"HIDDEN"})
+
+    extractor_folder: StringProperty(
+        name="Extractor Folder",
+        default="",
+        description="Folder containing ExtractDx11MESHFix.exe / ExtractNxgMESHFix.exe",
+    )
+
+    extractor_mode: EnumProperty(
+        name="Extractor Mode",
+        items=[
+            ('LEGACY', "Legacy", "Use the first extractor executable found"),
+            ('DX11', "DX11", "Use ExtractDx11MESH or ExtractDx11MESHFix"),
+            ('NXG', "NXG", "Use ExtractNxgMESH or ExtractNxgMESHFix"),
+        ],
+        default='LEGACY',
+        description="Choose which extractor family to use",
+    )
+
+    skeleton_source_file: StringProperty(
+        name="Skeleton Source GHG",
+        subtype="FILE_PATH",
+        default="",
+        description="Optional GHG used only to read skeleton bone names; leave empty to use the export target GHG",
+    )
+
+    def invoke(self, context, event):
+        _load_extractor_settings_from_prefs(self)
+        if not self.extractor_folder.strip():
+            self.extractor_folder = str(_addon_dir())
+        return ExportHelper.invoke(self, context, event)
+
+    def execute(self, context):
+        exp_ghg_file = Path(self.filepath).expanduser()
+
+        if not exp_ghg_file.exists():
+            self.report({"ERROR"}, f"Cannot export: file does not exist: {exp_ghg_file}")
+            return {"CANCELLED"}
+
+        if exp_ghg_file.is_dir():
+            self.report({"ERROR"}, f"Cannot export to a folder: {exp_ghg_file}")
+            return {"CANCELLED"}
+
+        exp_extractor_dir = _normalize_dir_path(self.extractor_folder)
+        if exp_extractor_dir is None or not exp_extractor_dir.exists() or not exp_extractor_dir.is_dir():
+            exp_extractor_dir = _addon_dir()
+
+        _save_extractor_settings_to_prefs(self)
+
+        try:
+            exp_ghg_bytes = _read_ghg_bytes(exp_ghg_file)
+
+            skeleton_source_path = self.skeleton_source_file.strip()
+            if skeleton_source_path:
+                exp_skeleton_source_file = Path(skeleton_source_path).expanduser()
+                if not exp_skeleton_source_file.exists() or exp_skeleton_source_file.is_dir():
+                    self.report({"ERROR"}, f"Skeleton source GHG does not exist or is a folder: {exp_skeleton_source_file}")
+                    return {"CANCELLED"}
+            else:
+                exp_skeleton_source_file = exp_ghg_file
+
+            exp_skeleton_bytes = _read_ghg_bytes(exp_skeleton_source_file)
+            exp_bone_names = _export_get_bone_names_from_ghg_bytes(exp_skeleton_bytes)
+
+            exp_extractor_output = _export_get_extractor_output(exp_extractor_dir, exp_ghg_file, self.extractor_mode)
+            exp_number_of_parts, exp_vertexlists, exp_skinned_vertexlist_ids = _export_get_vertexlist_offsets(exp_extractor_output, exp_ghg_bytes)
+            export_parts = _export_build_parts_from_selected_objects(context)
+
+            if not export_parts:
+                self.report({"WARNING"}, "No selected mesh parts could be exported.")
+                return {"CANCELLED"}
+
+            _export_write_part_blends(
+                exp_ghg_bytes=exp_ghg_bytes,
+                exp_ghg_file=exp_ghg_file,
+                exp_bone_names=exp_bone_names,
+                exp_extractor_output=exp_extractor_output,
+                exp_vertexlists=exp_vertexlists,
+                exp_skinned_vertexlist_ids=exp_skinned_vertexlist_ids,
+                export_parts=export_parts,
+            )
+
+        except Exception:
+            traceback.print_exc()
+            self.report({"ERROR"}, "Export failed. See the System Console for the full traceback.")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Exported to existing GHG: {exp_ghg_file.name}")
+        return {"FINISHED"}
+
+
 def menu_func_import(self, context):
     self.layout.operator(IMPORT_OT_ghg_skeleton_parts.bl_idname, text="GHG Skeleton + Skinned parts (.ghg)")
 
 
-# register logic for opening via the scripting tab, so if you click the play button multiple times there's only one import button still. Not needed if loading as an addon.
-# def register():
-#     old_func = getattr(bpy.types, "_ghg_import_menu_func", None)
-#     if old_func is not None:
-#         try:
-#             bpy.types.TOPBAR_MT_file_import.remove(old_func)
-#         except Exception:
-#             pass
-
-#     old_class = getattr(bpy.types, "_ghg_import_operator_class", None)
-#     if old_class is not None:
-#         try:
-#             bpy.utils.unregister_class(old_class)
-#         except Exception:
-#             pass
-
-#     bpy.utils.register_class(IMPORT_OT_ghg_skeleton_parts)
-
-#     bpy.types._ghg_import_menu_func = menu_func_import
-#     bpy.types._ghg_import_operator_class = IMPORT_OT_ghg_skeleton_parts
-
-#     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+def menu_func_export(self, context):
+    self.layout.operator(EXPORT_OT_ghg_skeleton_parts.bl_idname, text="Export GHG Parts skinnig (.ghg)")
 
 
 def register():
+    try:
+        unregister()
+    except Exception:
+        pass
+
+    bpy.utils.register_class(GHGAddonPreferences)
     bpy.utils.register_class(IMPORT_OT_ghg_skeleton_parts)
+    bpy.utils.register_class(EXPORT_OT_ghg_skeleton_parts)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 
 
 def unregister():
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-    bpy.utils.unregister_class(IMPORT_OT_ghg_skeleton_parts)
+    try:
+        bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    except Exception:
+        pass
+
+    try:
+        bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
+    except Exception:
+        pass
+
+    try:
+        bpy.utils.unregister_class(EXPORT_OT_ghg_skeleton_parts)
+    except Exception:
+        pass
+
+    try:
+        bpy.utils.unregister_class(IMPORT_OT_ghg_skeleton_parts)
+    except Exception:
+        pass
+
+    try:
+        bpy.utils.unregister_class(GHGAddonPreferences)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
