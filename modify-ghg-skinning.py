@@ -1210,9 +1210,8 @@ class EXPORT_OT_ghg_skeleton_parts(Operator, ExportHelper):
 
     skeleton_source_file: StringProperty(
         name="Skeleton Source GHG",
-        subtype="FILE_PATH",
         default="",
-        description="Optional GHG used only to read skeleton bone names; leave empty to use the export target GHG",
+        description="Some GHG files don't have a skeleton and use the skeleton of another GHG. The most common example is ADDITIONALMOEDLs using the correct SUPER_MINIFIG. Enter the path for the GHG file containing the skeleton if that's the case.",
     )
 
     def invoke(self, context, event):
@@ -1285,7 +1284,7 @@ def menu_func_import(self, context):
 
 
 def menu_func_export(self, context):
-    self.layout.operator(EXPORT_OT_ghg_skeleton_parts.bl_idname, text="Export GHG Parts skinnig (.ghg)")
+    self.layout.operator(EXPORT_OT_ghg_skeleton_parts.bl_idname, text="Export GHG Parts skinning (.ghg)")
 
 
 def register():
