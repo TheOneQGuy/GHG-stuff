@@ -2,7 +2,7 @@
 bl_info = {
     "name": "GHG Importer / Exporter (Skeleton + Skinned parts)",
     "author": "Queue Wafer",
-    "version": (2, 0, 0),
+    "version": (2, 0, 3),
     "blender": (3, 0, 0),
     "location": "File > Import > GHG Skeleton + Skinned parts (.ghg), File > Export > Parts skinning (.ghg)",
     "description": "Import a GHG skeleton and skinned parts, modify their skinning, and export the skining.",
@@ -97,10 +97,18 @@ class GHGAddonPreferences(AddonPreferences):
         description="Choose which extractor family to use",
     )
 
+    skeleton_source_file: StringProperty(
+        name="Skeleton Source GHG",
+        subtype="FILE_PATH",
+        default="",
+        description="Optional GHG file to read skeleton bone names from when exporting.",
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "extractor_folder")
         layout.prop(self, "extractor_mode")
+        layout.prop(self, "skeleton_source_file")
 
 
 def _load_extractor_settings_from_prefs(op):
@@ -111,6 +119,9 @@ def _load_extractor_settings_from_prefs(op):
         op.extractor_folder = prefs.extractor_folder
     if getattr(op, "extractor_mode", None) in {None, ""}:
         op.extractor_mode = _normalize_extractor_mode(prefs.extractor_mode)
+    if hasattr(op, "skeleton_source_file") and not getattr(op, "skeleton_source_file", "").strip():
+        if getattr(prefs, "skeleton_source_file", "").strip():
+            op.skeleton_source_file = prefs.skeleton_source_file
 
 
 def _save_extractor_settings_to_prefs(op):
@@ -119,6 +130,8 @@ def _save_extractor_settings_to_prefs(op):
         return
     prefs.extractor_folder = getattr(op, "extractor_folder", "")
     prefs.extractor_mode = _normalize_extractor_mode(getattr(op, "extractor_mode", "ANY"))
+    if hasattr(op, "skeleton_source_file"):
+        prefs.skeleton_source_file = getattr(op, "skeleton_source_file", "")
 
 
 def _addon_dir() -> Path:
@@ -978,6 +991,7 @@ def _export_build_parts_from_selected_objects(context):
                     weighted.append((group_name, weight))
 
             weighted.sort(key=lambda item: (-item[1], item[0]))
+            weighted = weighted[:4]
 
             total_weight = sum(weight for _, weight in weighted)
             if total_weight > 0.0:
@@ -1251,6 +1265,8 @@ class EXPORT_OT_ghg_skeleton_parts(Operator, ExportHelper):
 
             exp_skeleton_bytes = _read_ghg_bytes(exp_skeleton_source_file)
             exp_bone_names = _export_get_bone_names_from_ghg_bytes(exp_skeleton_bytes)
+            if exp_skeleton_source_file != exp_ghg_file:
+                print(f"Using skeleton source GHG for bone names: {exp_skeleton_source_file}")
 
             exp_extractor_output = _export_get_extractor_output(exp_extractor_dir, exp_ghg_file, self.extractor_mode)
             exp_number_of_parts, exp_vertexlists, exp_skinned_vertexlist_ids = _export_get_vertexlist_offsets(exp_extractor_output, exp_ghg_bytes)
