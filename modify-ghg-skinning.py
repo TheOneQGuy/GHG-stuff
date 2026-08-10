@@ -942,7 +942,37 @@ def _export_get_bone_names_from_ghg_bytes(exp_ghg_bytes: bytes):
     return [bone["name"] for bone in _parse_bones_from_ghg(exp_ghg_bytes)]
 
 
+def _export_get_skeleton_source_bytes(exp_ghg_file: Path, skeleton_source_file: str):
+    skeleton_source_path = skeleton_source_file.strip()
+    if not skeleton_source_path:
+        return exp_ghg_file.read_bytes(), exp_ghg_file
+
+    exp_skeleton_source_file = Path(skeleton_source_path).expanduser()
+    if not exp_skeleton_source_file.exists() or exp_skeleton_source_file.is_dir():
+        raise FileNotFoundError(f"Skeleton source GHG does not exist or is a folder: {exp_skeleton_source_file}")
+
+    return exp_skeleton_source_file.read_bytes(), exp_skeleton_source_file
+
+
+def _export_normalize_vertex_influences(weighted, max_influences=4):
+    weighted = [
+        (name, float(weight))
+        for name, weight in weighted
+        if name and name != "None" and float(weight) > 0.0
+    ]
+    weighted.sort(key=lambda item: (-item[1], item[0]))
+
+    while len(weighted) > max_influences:
+        weighted.pop()
+
+    total_weight = sum(weight for _, weight in weighted)
+    if total_weight > 0.0:
+        return [(name, weight / total_weight) for name, weight in weighted]
+    return []
+
+
 def _export_part_id_from_object_name(name: str):
+
     # Use the last 4 characters of the object name before Blender's ".001" suffix.
     # Example: "foo_dx110001" -> part id 1 from "0001".
     base_name = re.sub(r"\.[0-9]{3}$", "", name)
@@ -990,15 +1020,7 @@ def _export_build_parts_from_selected_objects(context):
                 if group_name:
                     weighted.append((group_name, weight))
 
-            weighted.sort(key=lambda item: (-item[1], item[0]))
-            weighted = weighted[:4]
-
-            total_weight = sum(weight for _, weight in weighted)
-            if total_weight > 0.0:
-                normalized = [(name, weight / total_weight) for name, weight in weighted]
-            else:
-                normalized = []
-
+            normalized = _export_normalize_vertex_influences(weighted, max_influences=4)
             per_vertex_names.append([name for name, _ in normalized])
             per_vertex_weights.append([weight for _, weight in normalized])
 
@@ -1068,24 +1090,10 @@ def _export_part_spans(exp_extractor_output: str):
     return spans
 
 
-def _export_write_part_blends(
-    exp_ghg_bytes: bytes,
-    exp_ghg_file: Path,
-    exp_bone_names: list[str],
-    exp_extractor_output: str,
-    exp_vertexlists: dict,
-    exp_skinned_vertexlist_ids: list,
-    export_parts: dict,
-):
-    part_spans = {part_id: (start, end) for part_id, start, end in _export_part_spans(exp_extractor_output)}
-    updated_bytes = exp_ghg_bytes
+def _export_collect_part_metadata(exp_extractor_output: str, exp_skinned_vertexlist_ids: list):
+    part_metadata = {}
 
-    for part_id, part_info in export_parts.items():
-        if part_id not in part_spans:
-            print(f"Export skipped part {part_id}: part block not found in extractor output.")
-            continue
-
-        start_string_index, end_string_index = part_spans[part_id]
+    for part_id, start_string_index, end_string_index in _export_part_spans(exp_extractor_output):
         extractor_part_info = exp_extractor_output[start_string_index:end_string_index]
 
         part_vertexlist_id = None
@@ -1098,15 +1106,72 @@ def _export_write_part_blends(
                 break
 
         if part_vertexlist_id is None:
-            print(f"Export skipped part {part_id}: no skinned vertex list reference found.")
-            continue
-
-        if part_vertexlist_id not in exp_vertexlists:
-            print(f"Export skipped part {part_id}: vertex list metadata missing.")
             continue
 
         offset_vertices = _get_extractor_value("Offset Vertices: 0x", string=extractor_part_info)
         number_vertices = _get_extractor_value("Number Vertices: 0x", string=extractor_part_info)
+
+        bone_indices_raw = _get_extractor_value(
+            "Number Vertices: 0x",
+            offset=8 + 1 + 8 + 5,
+            length=80,
+            integer_output=False,
+            string=extractor_part_info,
+        )
+        has_bone_indices = len(bone_indices_raw) == 80
+        bone_indices_offset = None
+        if has_bone_indices:
+            bone_indices_offset = _get_extractor_value(
+                "Number Vertices: 0x",
+                offset=8 + 1,
+                length=8,
+                integer_output=True,
+                string=extractor_part_info,
+            )
+
+        part_metadata[part_id] = {
+            "start": start_string_index,
+            "end": end_string_index,
+            "vertexlist_id": part_vertexlist_id,
+            "offset_vertices": offset_vertices,
+            "number_vertices": number_vertices,
+            "has_bone_indices": has_bone_indices,
+            "bone_indices_offset": bone_indices_offset,
+        }
+
+    return part_metadata
+
+
+def _export_write_part_blends(
+    exp_ghg_bytes: bytes,
+    exp_ghg_file: Path,
+    exp_bone_names: list[str],
+    exp_extractor_output: str,
+    exp_vertexlists: dict,
+    exp_skinned_vertexlist_ids: list,
+    export_parts: dict,
+):
+    part_metadata = _export_collect_part_metadata(exp_extractor_output, exp_skinned_vertexlist_ids)
+    updated_bytes = exp_ghg_bytes
+
+    sibling_groups = {}
+    for pid, meta in part_metadata.items():
+        key = (meta["vertexlist_id"], meta["offset_vertices"], meta["number_vertices"])
+        sibling_groups.setdefault(key, []).append(pid)
+
+    for part_id, part_info in export_parts.items():
+        meta = part_metadata.get(part_id)
+        if meta is None:
+            print(f"Export skipped part {part_id}: part block not found or not skinned in extractor output.")
+            continue
+
+        part_vertexlist_id = meta["vertexlist_id"]
+        if part_vertexlist_id not in exp_vertexlists:
+            print(f"Export skipped part {part_id}: vertex list metadata missing.")
+            continue
+
+        offset_vertices = meta["offset_vertices"]
+        number_vertices = meta["number_vertices"]
 
         blendnames_by_vertex = part_info.get("blendnames", [])
         blendweights_by_vertex = part_info.get("blendweights", [])
@@ -1136,7 +1201,6 @@ def _export_write_part_blends(
             print(f"Export skipped part {part_id}: no usable bone names found.")
             continue
 
-        # Keep only names that exist in the target GHG skeleton.
         missing = [name for name in used_bone_names if name not in exp_bone_names]
         if missing:
             print(f"Export skipped part {part_id}: missing bones in GHG: {missing}")
@@ -1144,31 +1208,30 @@ def _export_write_part_blends(
 
         bone_names_in_order_of_use = used_bone_names
 
-        # Some extractor outputs include a bone-index remap table for this part.
-        bone_indices_raw = _get_extractor_value(
-            "Number Vertices: 0x",
-            offset=8 + 1 + 8 + 5,
-            length=80,
-            integer_output=False,
-            string=extractor_part_info,
-        )
-        has_bone_indices = len(bone_indices_raw) == 80
+        # Update remap tables for every part that shares these vertices.
+        if meta["has_bone_indices"]:
+            if len(used_bone_names) > 27:
+                print(f"Export skipped part {part_id}: too many bones for the remap table.")
+                continue
+            bone_indices_to_write = bytes([exp_bone_names.index(name) for name in used_bone_names])
+            bone_indices_to_write += bytes([0xFF]) * (27 - len(bone_indices_to_write))
 
-        if has_bone_indices:
-            bone_indices_offset = _get_extractor_value(
-                "Number Vertices: 0x",
-                offset=8 + 1,
-                length=8,
-                integer_output=True,
-                string=extractor_part_info,
+            sibling_ids = sibling_groups.get(
+                (part_vertexlist_id, offset_vertices, number_vertices),
+                [part_id],
             )
-            bone_indices_ints = [exp_bone_names.index(name) for name in used_bone_names]
-            bone_indices_to_write = bytes(bone_indices_ints) + bytes([0xFF]) * (27 - len(bone_indices_ints))
-            updated_bytes = (
-                updated_bytes[:bone_indices_offset] +
-                bone_indices_to_write +
-                updated_bytes[bone_indices_offset + 27:]
-            )
+            for sibling_id in sibling_ids:
+                sibling_meta = part_metadata.get(sibling_id)
+                if not sibling_meta or not sibling_meta["has_bone_indices"]:
+                    continue
+                sibling_offset = sibling_meta["bone_indices_offset"]
+                if sibling_offset is None:
+                    continue
+                updated_bytes = (
+                    updated_bytes[:sibling_offset] +
+                    bone_indices_to_write +
+                    updated_bytes[sibling_offset + 27:]
+                )
 
         used_vertexlist_offset = exp_vertexlists[part_vertexlist_id]["offset"]
         used_vertexlist_attrlensum = exp_vertexlists[part_vertexlist_id]["attrlengths_sum"]
@@ -1254,16 +1317,10 @@ class EXPORT_OT_ghg_skeleton_parts(Operator, ExportHelper):
         try:
             exp_ghg_bytes = _read_ghg_bytes(exp_ghg_file)
 
-            skeleton_source_path = self.skeleton_source_file.strip()
-            if skeleton_source_path:
-                exp_skeleton_source_file = Path(skeleton_source_path).expanduser()
-                if not exp_skeleton_source_file.exists() or exp_skeleton_source_file.is_dir():
-                    self.report({"ERROR"}, f"Skeleton source GHG does not exist or is a folder: {exp_skeleton_source_file}")
-                    return {"CANCELLED"}
-            else:
-                exp_skeleton_source_file = exp_ghg_file
-
-            exp_skeleton_bytes = _read_ghg_bytes(exp_skeleton_source_file)
+            exp_skeleton_bytes, exp_skeleton_source_file = _export_get_skeleton_source_bytes(
+                exp_ghg_file,
+                self.skeleton_source_file,
+            )
             exp_bone_names = _export_get_bone_names_from_ghg_bytes(exp_skeleton_bytes)
             if exp_skeleton_source_file != exp_ghg_file:
                 print(f"Using skeleton source GHG for bone names: {exp_skeleton_source_file}")
